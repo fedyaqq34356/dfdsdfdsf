@@ -1,4 +1,4 @@
-# bot_instagram_parser.py
+# main.py
 import os
 import asyncio
 import time
@@ -21,10 +21,7 @@ from selenium.webdriver.support import expected_conditions as EC
 from selenium.webdriver.chrome.options import Options
 from selenium.webdriver.chrome.service import Service
 from selenium.common.exceptions import TimeoutException, NoSuchElementException
-from webdriver_manager.chrome import ChromeDriverManager
 
-
-# ====================== СИНХРОННЫЙ SELENIUM ПАРСЕР ======================
 
 class InstagramParser:
     def __init__(self, cookies_file='cookies.json'):
@@ -32,19 +29,45 @@ class InstagramParser:
         self.driver = None
         self.collected_usernames = set()
 
-    # -------- infra --------
     def setup_driver(self):
         print("[SETUP] Запуск браузера...")
         options = Options()
-        options.add_argument('--disable-blink-features=AutomationControlled')
+        
+        # HEADLESS режим для Railway
+        options.add_argument('--headless=new')
         options.add_argument('--no-sandbox')
         options.add_argument('--disable-dev-shm-usage')
+        options.add_argument('--disable-gpu')
+        options.add_argument('--window-size=1920,1080')
+        options.add_argument('--disable-blink-features=AutomationControlled')
+        options.add_argument('--disable-software-rasterizer')
+        options.add_argument('--disable-extensions')
+        options.add_argument('--disable-setuid-sandbox')
+        options.add_argument('--remote-debugging-port=9222')
+        
+        # Для Railway/Docker
+        options.binary_location = os.getenv('GOOGLE_CHROME_BIN', '/usr/bin/chromium')
+        
         options.add_experimental_option("excludeSwitches", ["enable-automation"])
         options.add_experimental_option('useAutomationExtension', False)
 
-        service = Service(ChromeDriverManager().install())
-        self.driver = webdriver.Chrome(service=service, options=options)
-        print("[SETUP] Драйвер готов")
+        try:
+            # Пробуем использовать chromedriver из системы
+            chromedriver_path = os.getenv('CHROMEDRIVER_PATH', '/usr/bin/chromedriver')
+            if os.path.exists(chromedriver_path):
+                service = Service(chromedriver_path)
+                print(f"[SETUP] Используем системный chromedriver: {chromedriver_path}")
+            else:
+                # Fallback на webdriver-manager (локально)
+                from webdriver_manager.chrome import ChromeDriverManager
+                service = Service(ChromeDriverManager().install())
+                print("[SETUP] Используем webdriver-manager")
+            
+            self.driver = webdriver.Chrome(service=service, options=options)
+            print("[SETUP] Драйвер готов (headless режим)")
+        except Exception as e:
+            print(f"[ERROR] Не удалось запустить браузер: {e}")
+            raise
 
     def teardown(self):
         if self.driver:
@@ -85,7 +108,6 @@ class InstagramParser:
         time.sleep(3)
         return True
 
-    # -------- навигация/открытие --------
     def go_to_profile(self, username: str):
         url = f"https://www.instagram.com/{username}/"
         print(f"[NAVIGATION] Открываю профиль: {url}")
@@ -93,7 +115,6 @@ class InstagramParser:
         time.sleep(3)
 
     def open_modal(self, mode: str):
-        """mode: 'followers' | 'following' — открываем нужный список"""
         print(f"[MODAL] Открываю список: {mode}")
         try:
             if mode == "followers":
@@ -101,13 +122,11 @@ class InstagramParser:
                     EC.element_to_be_clickable((By.XPATH, "//a[contains(@href, '/followers')]"))
                 )
             else:
-                # сначала пытаемся по href
                 try:
                     btn = WebDriverWait(self.driver, 8).until(
                         EC.element_to_be_clickable((By.XPATH, "//a[contains(@href, '/following')]"))
                     )
                 except TimeoutException:
-                    # запасной абсолютный XPATH
                     btn = WebDriverWait(self.driver, 8).until(
                         EC.element_to_be_clickable((By.XPATH,
                           "/html/body/div[1]/div/div/div[2]/div/div/div[1]/div[2]/div[1]/section/main/div/div/header/div/section[2]/div/div[3]/div[3]/a"))
@@ -123,7 +142,6 @@ class InstagramParser:
             print(f"[ERROR] Не удалось открыть окно: {e}")
             return False
 
-    # -------- контейнер для скролла --------
     def _get_scroll_container(self, mode: str):
         print(f"[SCROLL] Поиск контейнера для режима: {mode}")
         xpaths = []
@@ -144,20 +162,19 @@ class InstagramParser:
         for i, xpath in enumerate(xpaths, 1):
             try:
                 container = self.driver.find_element(By.XPATH, xpath)
-                print(f"[SCROLL] ✓ Контейнер найден (вариант {i}): {xpath[:60]}...")
+                print(f"[SCROLL] ✓ Контейнер найден (вариант {i})")
                 is_scrollable = self.driver.execute_script("""
                     const el = arguments[0];
                     const hasScroll = el.scrollHeight > el.clientHeight;
                     const style = window.getComputedStyle(el);
                     const isOverflow = style.overflowY === 'auto' || style.overflowY === 'scroll';
-                    console.log('hasScroll:', hasScroll, 'isOverflow:', isOverflow, 'scrollHeight:', el.scrollHeight, 'clientHeight:', el.clientHeight);
                     return hasScroll && isOverflow;
                 """, container)
                 if is_scrollable:
                     print(f"[SCROLL] ✓ Контейнер подтверждён как скроллируемый")
                     return container
                 else:
-                    print(f"[SCROLL] ⚠ Контейнер найден, но не скроллируется. Пробуем следующий...")
+                    print(f"[SCROLL] ⚠ Контейнер не скроллируется. Пробуем следующий...")
             except NoSuchElementException:
                 print(f"[SCROLL] ✗ Вариант {i} не найден")
                 continue
@@ -187,10 +204,9 @@ class InstagramParser:
         except Exception as e:
             print(f"[SCROLL] JS поиск не удался: {e}")
 
-        print("[ERROR] ✗ Контейнер для скролла не найден ни одним способом")
+        print("[ERROR] ✗ Контейнер для скролла не найден")
         return None
 
-    # -------- извлечение имён (без фильтра) --------
     def extract_usernames(self) -> int:
         new_count = 0
         try:
@@ -218,7 +234,6 @@ class InstagramParser:
         except Exception:
             return False
 
-    # -------- основной скролл --------
     def scroll_and_collect(self, mode: str):
         print("[SCROLL] Старт сбора…")
         self.collected_usernames.clear()
@@ -227,13 +242,6 @@ class InstagramParser:
         if not container:
             print("[ERROR] Невозможно продолжить без контейнера")
             return
-
-        try:
-            scroll_height = self.driver.execute_script("return arguments[0].scrollHeight", container)
-            client_height = self.driver.execute_script("return arguments[0].clientHeight", container)
-            print(f"[INFO] Контейнер готов (scrollHeight={scroll_height}, clientHeight={client_height})")
-        except Exception as e:
-            print(f"[WARNING] Не удалось получить размеры контейнера: {e}")
 
         no_new, iteration = 0, 0
 
@@ -255,17 +263,9 @@ class InstagramParser:
             else:
                 no_new = 0
 
-            try:
-                before_scroll = self.driver.execute_script("return arguments[0].scrollTop", container)
-                before_height = self.driver.execute_script("return arguments[0].scrollHeight", container)
-                print(f"[DEBUG] До скролла - scrollTop: {before_scroll}, scrollHeight: {before_height}")
-            except Exception as e:
-                print(f"[DEBUG ERROR] Перед скроллом: {e}")
-
             scroll_success = False
             try:
                 self.driver.execute_script("arguments[0].scrollTop = arguments[0].scrollHeight", container)
-                print("[DEBUG] ✓ Метод 1: scrollTop=scrollHeight выполнен")
                 scroll_success = True
             except Exception as e:
                 print(f"[DEBUG] Метод 1 не сработал: {e}")
@@ -273,7 +273,6 @@ class InstagramParser:
             if not scroll_success:
                 try:
                     self.driver.execute_script("arguments[0].scrollBy(0, arguments[0].clientHeight)", container)
-                    print("[DEBUG] ✓ Метод 2: scrollBy выполнен")
                     scroll_success = True
                 except Exception as e:
                     print(f"[DEBUG] Метод 2 не сработал: {e}")
@@ -286,7 +285,6 @@ class InstagramParser:
                     self.driver.execute_script(
                         "arguments[0].dispatchEvent(new WheelEvent('wheel', {deltaY: 500}))", container
                     )
-                    print("[DEBUG] ✓ Метод 3: wheel event выполнен")
                     scroll_success = True
                 except Exception as e:
                     print(f"[DEBUG] Метод 3 не сработал: {e}")
@@ -297,15 +295,6 @@ class InstagramParser:
 
             time.sleep(random.uniform(0.1, 0.4))
             time.sleep(3)
-
-            try:
-                after_scroll = self.driver.execute_script("return arguments[0].scrollTop", container)
-                after_height = self.driver.execute_script("return arguments[0].scrollHeight", container)
-                print(f"[DEBUG] После скролла - scrollTop: {after_scroll}, scrollHeight: {after_height}")
-                if after_scroll == before_scroll and after_height == before_height:
-                    print("[WARNING] Скролл не изменил позицию — возможно конец списка")
-            except Exception as e:
-                print(f"[DEBUG ERROR] После скролла: {e}")
 
         print(f"[РЕЗУЛЬТАТ] Собрано {len(self.collected_usernames)} username'ов")
 
@@ -326,7 +315,7 @@ class InstagramParser:
         try:
             self.setup_driver()
             if not self.load_cookies():
-                print("[ERROR] Cookies не загружены — парсинг может не работать.")
+                print("[ERROR] Cookies не загружены")
             self.go_to_profile(username)
             if not self.open_modal(mode):
                 return None
@@ -356,11 +345,10 @@ class ParseStates(StatesGroup):
 @router.message(Command("start"))
 async def cmd_start(msg: types.Message):
     text = (
-        "Привет! Я парсю Instagram (нужны cookies.json рядом со скриптом).\n\n"
+        "Привет! Я парсю Instagram (headless режим для Railway).\n\n"
         "Команды:\n"
-        "/parse — ввести username (без @). Бот сначала соберёт *подписчиков*, пришлёт Excel, "
-        "затем соберёт *подписки* и тоже пришлёт Excel.\n\n"
-        "⚠️ Используй аккаунт с валидными cookies. Браузер запускается не headless — это безопаснее."
+        "/parse — ввести username (без @). Бот соберёт подписчиков и подписки.\n\n"
+        "⚠️ Нужны валидные cookies.json"
     )
     await msg.answer(text, parse_mode="Markdown")
 
@@ -368,18 +356,18 @@ async def cmd_start(msg: types.Message):
 @router.message(Command("parse"))
 async def cmd_parse(msg: types.Message, state: FSMContext):
     await state.set_state(ParseStates.waiting_username)
-    await msg.answer("Ок. Введи username профиля (без @), например: `accepy.ua`", parse_mode="Markdown")
+    await msg.answer("Введи username профиля (без @):", parse_mode="Markdown")
 
 
 @router.message(ParseStates.waiting_username)
 async def handle_username(msg: types.Message, state: FSMContext):
     username = (msg.text or "").strip().lstrip("@")
     if not username:
-        await msg.reply("Нужно указать username. Попробуй ещё раз.")
+        await msg.reply("Нужно указать username")
         return
 
     await state.clear()
-    await msg.answer(f"Начинаю парсинг для: @{username}\nСначала *подписчики*, затем *подписки*…", parse_mode="Markdown")
+    await msg.answer(f"Начинаю парсинг: @{username}", parse_mode="Markdown")
 
     loop = asyncio.get_running_loop()
 
@@ -394,21 +382,27 @@ async def handle_username(msg: types.Message, state: FSMContext):
         if path and path.exists():
             await msg.answer_document(
                 types.FSInputFile(path),
-                caption=f"{title} — готово ({path.name})"
+                caption=f"{title} — готово"
             )
+            # Удаляем файл после отправки
+            try:
+                path.unlink()
+            except:
+                pass
         else:
-            await msg.answer(f"⚠️ {title}: ничего не собрано или не удалось открыть список.")
+            await msg.answer(f"⚠️ {title}: ничего не собрано")
 
     await run_mode_and_send("followers", "Подписчики")
     await run_mode_and_send("following", "Подписки")
 
-    await msg.answer("✅ Готово.")
+    await msg.answer("✅ Готово")
 
 
 async def main():
     bot = Bot(BOT_TOKEN, default=DefaultBotProperties(parse_mode="HTML"))
     dp = Dispatcher()
     dp.include_router(router)
+    print("[BOT] Запуск бота...")
     await dp.start_polling(bot)
 
 
@@ -416,4 +410,4 @@ if __name__ == "__main__":
     try:
         asyncio.run(main())
     except (KeyboardInterrupt, SystemExit):
-        print("Bot stopped.")
+        print("[BOT] Остановлен")
